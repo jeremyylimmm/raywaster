@@ -10,7 +10,9 @@
 #include <format>
 #include <vector>
 #include <fstream>
+#include <chrono>
 
+#include "model.h"
 
 using namespace DirectX;
 
@@ -108,6 +110,37 @@ struct CameraCbuffer {
   XMMATRIX inv_view_proj;
 };
 
+template<typename T>
+static std::pair<ID3D11Buffer*, ID3D11ShaderResourceView*> create_immutable_structured_buffer(ID3D11Device* device, T* data, size_t count) {
+  assert(count <= UINT_MAX);
+
+  D3D11_BUFFER_DESC buffer_desc = {};
+  buffer_desc.ByteWidth = (UINT)(count * sizeof(T));
+  buffer_desc.Usage = D3D11_USAGE_IMMUTABLE;
+  buffer_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+  buffer_desc.StructureByteStride = sizeof(T);
+  buffer_desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+
+
+  D3D11_SUBRESOURCE_DATA initial_data = {
+    .pSysMem = data,
+    .SysMemPitch = buffer_desc.ByteWidth
+  };
+
+  ID3D11Buffer* buffer = nullptr;
+  device->CreateBuffer(&buffer_desc, &initial_data, &buffer);
+
+  D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
+  srv_desc.Format = DXGI_FORMAT_UNKNOWN;
+  srv_desc.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+  srv_desc.Buffer.NumElements = (UINT)count;
+
+  ID3D11ShaderResourceView* srv;
+  device->CreateShaderResourceView(buffer, &srv_desc, &srv);
+
+  return {buffer, srv};
+}
+
 int main() {
   WNDCLASSA wc = {
     .lpfnWndProc = window_proc,
@@ -173,6 +206,17 @@ int main() {
   ID3D11Buffer* camera_cbuffer = nullptr;
   device->CreateBuffer(&camera_cbuffer_desc, nullptr, &camera_cbuffer);
 
+  Model model = *load_gltf("models/cube/scene.gltf");
+
+  Mesh& mesh0 = model.meshes[0];
+
+  auto [positions_buf, positions_srv]   = create_immutable_structured_buffer<XMFLOAT3>(device, mesh0.positions.data(), mesh0.positions.size());
+  auto [normals_buf, normals_srv]       = create_immutable_structured_buffer<XMFLOAT3>(device, mesh0.normals.data(), mesh0.normals.size());
+  auto [tex_coords_buf, tex_coords_srv] = create_immutable_structured_buffer<XMFLOAT2>(device, mesh0.tex_coords.data(), mesh0.tex_coords.size());
+  auto [indices_buf, indices_srv]       = create_immutable_structured_buffer<uint32_t>(device, mesh0.indices.data(), mesh0.indices.size());
+
+  auto start = std::chrono::steady_clock::now();
+
   for (;;) {
     window_events = {};
 
@@ -195,7 +239,10 @@ int main() {
 
     ctx->CSSetShader(compute_shader, nullptr, 0);
 
-    XMMATRIX view = XMMatrixLookAtRH({0.0f, 0.5f, 3.0f}, {0.0f, 0.5f, 0.0f}, {0.0f, 1.0f, 0.0f});
+    auto now = std::chrono::steady_clock::now();
+    float time = (float)std::chrono::duration_cast<std::chrono::microseconds>(now - start).count() * 1e-6f;
+
+    XMMATRIX view = XMMatrixLookAtRH({cosf(time) * 6.0f, 2.0f, sinf(time) * 6.0f}, {0.0f, 0.5f, 0.0f}, {0.0f, 1.0f, 0.0f});
     XMMATRIX proj = XMMatrixPerspectiveFovRH(XM_PI*0.25f, (float)frame_dependents.w/(float)frame_dependents.h, 0.01f, 1000.0f);
 
     D3D11_MAPPED_SUBRESOURCE mapped_camera_cbuffer;
@@ -209,6 +256,15 @@ int main() {
 
     ctx->CSSetUnorderedAccessViews(0, 1, &frame_dependents.rt0_uav, nullptr);
     ctx->CSSetConstantBuffers(0, 1, &camera_cbuffer);
+
+    ID3D11ShaderResourceView* srvs_bind[] = {
+      positions_srv,
+      normals_srv,
+      tex_coords_srv,
+      indices_srv
+    };
+
+    ctx->CSSetShaderResources(0, std::size(srvs_bind), srvs_bind);
 
     ctx->Dispatch((frame_dependents.w+cs_thread_group_x-1)/cs_thread_group_x, (frame_dependents.h+cs_thread_group_y-1)/cs_thread_group_y, 1);
 
