@@ -2,6 +2,7 @@
 #include <dxgi.h>
 #include <d3d11.h>
 #include <d3dcompiler.h>
+#include <DirectXMath.h>
 
 #include <iostream>
 #include <utility>
@@ -10,6 +11,8 @@
 #include <vector>
 #include <fstream>
 
+
+using namespace DirectX;
 
 static constexpr DXGI_FORMAT SWAPCHAIN_FORMAT = DXGI_FORMAT_R8G8B8A8_UNORM;
 
@@ -100,6 +103,11 @@ static std::vector<char> load_bin(const char* path) {
   return std::vector(std::istreambuf_iterator<char>(input), {});
 }
 
+struct CameraCbuffer {
+  XMMATRIX inv_view;
+  XMMATRIX inv_view_proj;
+};
+
 int main() {
   WNDCLASSA wc = {
     .lpfnWndProc = window_proc,
@@ -156,6 +164,15 @@ int main() {
 
   cs_refl->Release();
 
+  D3D11_BUFFER_DESC camera_cbuffer_desc = {};
+  camera_cbuffer_desc.ByteWidth = sizeof(CameraCbuffer);
+  camera_cbuffer_desc.Usage = D3D11_USAGE_DYNAMIC;
+  camera_cbuffer_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+  camera_cbuffer_desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+
+  ID3D11Buffer* camera_cbuffer = nullptr;
+  device->CreateBuffer(&camera_cbuffer_desc, nullptr, &camera_cbuffer);
+
   for (;;) {
     window_events = {};
 
@@ -177,7 +194,21 @@ int main() {
     }
 
     ctx->CSSetShader(compute_shader, nullptr, 0);
+
+    XMMATRIX view = XMMatrixLookAtRH({0.0f, 0.5f, 3.0f}, {0.0f, 0.5f, 0.0f}, {0.0f, 1.0f, 0.0f});
+    XMMATRIX proj = XMMatrixPerspectiveFovRH(XM_PI*0.25f, (float)frame_dependents.w/(float)frame_dependents.h, 0.01f, 1000.0f);
+
+    D3D11_MAPPED_SUBRESOURCE mapped_camera_cbuffer;
+    ctx->Map(camera_cbuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped_camera_cbuffer);
+
+    CameraCbuffer* camera_cbuffer_data = (CameraCbuffer*)mapped_camera_cbuffer.pData;
+    camera_cbuffer_data->inv_view = XMMatrixInverse(nullptr, view);
+    camera_cbuffer_data->inv_view_proj = XMMatrixInverse(nullptr, view * proj);
+
+    ctx->Unmap(camera_cbuffer, 0);
+
     ctx->CSSetUnorderedAccessViews(0, 1, &frame_dependents.rt0_uav, nullptr);
+    ctx->CSSetConstantBuffers(0, 1, &camera_cbuffer);
 
     ctx->Dispatch((frame_dependents.w+cs_thread_group_x-1)/cs_thread_group_x, (frame_dependents.h+cs_thread_group_y-1)/cs_thread_group_y, 1);
 
