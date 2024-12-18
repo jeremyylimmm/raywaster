@@ -18,35 +18,40 @@ struct HitRecord {
   float3 p;
   float3 n;
   float t;
+  float2 uv;
 };
 
-bool hit(Ray r, float tmin, float tmax, float3 center, float radius, out HitRecord rec) {
-  float3 oc = center - r.o;
-  float a = dot(r.d, r.d);
-  float h = dot(r.d, oc);
-  float c = dot(oc, oc) - radius*radius;
+struct Triangle {
+  float3 pos[3];
+  float3 norm[3];
+  float2 uv[3];
+};
 
-  float discriminant = h*h - a*c;
-  if (discriminant < 0.0)
-      return false;
+// Yoinked from
+https://stackoverflow.com/questions/42740765/intersection-between-line-and-triangle-in-3d/42752998#42752998
+bool intersect_triangle(Ray R, float tmin, float tmax, Triangle tri, out HitRecord rec) { 
+  float3 E1 = tri.pos[1]-tri.pos[0];
+  float3 E2 = tri.pos[2]-tri.pos[0];
+  float3 N = cross(E1,E2);
+  float det = -dot(R.d, N);
+  float invdet = 1.0f/det;
+  float3 AO  = R.o - tri.pos[0];
+  float3 DAO = cross(AO, R.d);
+   
+  float t = dot(AO,N)  * invdet; 
+  float u =  dot(E2,DAO) * invdet;
+  float v = -dot(E1,DAO) * invdet;
 
-  float sqrtd = sqrt(discriminant);
+  float w = 1.0f-u-v;
 
-  // Find the nearest root that lies in the acceptable range.
-  float root = (h - sqrtd) / a;
-  if (root <= tmin || tmax <= root) {
-    root = (h + sqrtd) / a;
-    if (root <= tmin || tmax <= root)
-        return false;
-  }
+  rec.p = R.at(t);
+  rec.n = normalize(w * tri.norm[0] + u * tri.norm[1] + v * tri.norm[2]);
+  rec.uv = w * tri.uv[0] + u * tri.uv[1] + v * tri.uv[2];
+  rec.t = t;
 
-  rec.t = root;
-  rec.p = r.at(rec.t);
-  rec.n = (rec.p - center) / radius;
-
-  return true;
+  return (det >= 1e-6 && t > tmin && t < tmax && u >= 0.0f && v >= 0.0f && (u+v) <= 1.0f);
 }
-
+ 
 
 [numthreads(32, 32, 1)]
 void main( uint3 thread_id : SV_DispatchThreadID )
@@ -62,7 +67,7 @@ void main( uint3 thread_id : SV_DispatchThreadID )
   float4 world_space_hom = mul(inv_view_proj, float4(ndc, 0.5f, 1.0f));
   float3 world_space = world_space_hom.xyz / world_space_hom.w;
 
-  float3 camera_pos = mul(inv_view, float4(0.0f, 0.0f, 0.0f, 1.0f));
+  float3 camera_pos = mul(inv_view, float4(0.0f, 0.0f, 0.0f, 1.0f)).xyz;
 
   Ray ray;
   ray.o = camera_pos;
@@ -70,9 +75,22 @@ void main( uint3 thread_id : SV_DispatchThreadID )
 
   float3 color;
 
+  Triangle tri;
+  tri.pos[0] = float3(0.0f, 1.0f, 0.0f);
+  tri.pos[1] = float3(-1.0f, 0.0f, 0.0f);
+  tri.pos[2] = float3(1.0f, 0.0f, 0.0f);
+
+  tri.norm[0] = float3(1.0f, 0.0f, 0.0f);
+  tri.norm[1] = float3(0.0f, 1.0f, 0.0f);
+  tri.norm[2] = float3(0.0f, 0.0f, 1.0f);
+
+  tri.uv[0] = float2(0.1f, 0.0f);
+  tri.uv[1] = float2(0.0f, 1.0f);
+  tri.uv[2] = float2(0.0f, 0.0f);
+
   HitRecord rec;
-  if (hit(ray, 0.0, 10000.0f, float3(0.0f, 0.5f, 0.05f), 0.5f, rec)) {
-    color = rec.n * 0.5 + 0.5;
+  if (intersect_triangle(ray, 0.0, 10000.0f, tri, rec)) {
+    color = rec.n;
   }
   else  {
     color = float3(0.01f, 0.01f, 0.01f);
