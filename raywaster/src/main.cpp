@@ -13,6 +13,7 @@
 #include <chrono>
 
 #include "model.h"
+#include "bvh.h"
 
 using namespace DirectX;
 
@@ -206,14 +207,18 @@ int main() {
   ID3D11Buffer* camera_cbuffer = nullptr;
   device->CreateBuffer(&camera_cbuffer_desc, nullptr, &camera_cbuffer);
 
-  Model model = *load_gltf("models/cube/scene.gltf");
+  Model model = *load_gltf("models/damaged_helmet_embedded/scene.gltf");
 
   Mesh& mesh0 = model.meshes[0];
+
+  std::vector<bvh::Node> bvh = bvh::construct_bvh(mesh0.positions, mesh0.indices);
+  (void)bvh;
 
   auto [positions_buf, positions_srv]   = create_immutable_structured_buffer<XMFLOAT3>(device, mesh0.positions.data(), mesh0.positions.size());
   auto [normals_buf, normals_srv]       = create_immutable_structured_buffer<XMFLOAT3>(device, mesh0.normals.data(), mesh0.normals.size());
   auto [tex_coords_buf, tex_coords_srv] = create_immutable_structured_buffer<XMFLOAT2>(device, mesh0.tex_coords.data(), mesh0.tex_coords.size());
   auto [indices_buf, indices_srv]       = create_immutable_structured_buffer<uint32_t>(device, mesh0.indices.data(), mesh0.indices.size());
+  auto [bvh_buf, bvh_srv]               = create_immutable_structured_buffer<bvh::Node>(device, bvh.data(), bvh.size());
 
   auto start = std::chrono::steady_clock::now();
 
@@ -261,7 +266,8 @@ int main() {
       positions_srv,
       normals_srv,
       tex_coords_srv,
-      indices_srv
+      indices_srv,
+      bvh_srv
     };
 
     ctx->CSSetShaderResources(0, std::size(srvs_bind), srvs_bind);
@@ -270,7 +276,7 @@ int main() {
 
     ctx->CopyResource(frame_dependents.swapchain_texture, frame_dependents.rt0);
 
-    swapchain->Present(1, 0);
+    swapchain->Present(0, 0);
   }
 
   return 0;

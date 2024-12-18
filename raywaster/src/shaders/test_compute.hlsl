@@ -1,3 +1,11 @@
+#define MAX_BVH_DEPTH 32
+
+struct BVHNode {
+  float3 min;
+  float3 max;
+  uint children[2];
+};
+
 RWTexture2D<float4> render_target : register(u0);
 
 cbuffer Camera : register(b0) {
@@ -9,10 +17,12 @@ StructuredBuffer<float3> positions : register(t0);
 StructuredBuffer<float3> normals : register(t1);
 StructuredBuffer<float2> tex_coords : register(t2);
 StructuredBuffer<uint> indices : register(t3);
+StructuredBuffer<BVHNode> bvh : register(t4);
 
 struct Ray {
   float3 o;
   float3 d;
+  float3 inv_d;
 
   float3 at(float t) {
     return o + d * t;
@@ -55,7 +65,74 @@ bool intersect_triangle(Ray r, float tmin, float tmax, uint tri_idx, out HitReco
   return (det >= 1e-6 && t > tmin && t < tmax && u >= 0.0f && v >= 0.0f && (u+v) <= 1.0f);
 }
 
-[numthreads(32, 32, 1)]
+float ray_aabb_dst(Ray ray, float3 boxMin, float3 boxMax)
+{
+  float3 tMin = (boxMin - ray.o) * ray.inv_d;
+  float3 tMax = (boxMax - ray.o) * ray.inv_d;
+  float3 t1 = min(tMin, tMax);
+  float3 t2 = max(tMin, tMax);
+  float tNear = max(max(t1.x, t1.y), t1.z);
+  float tFar = min(min(t2.x, t2.y), t2.z);
+
+  bool hit = tFar >= tNear && tFar > 0;
+  float dst = hit ? tNear > 0 ? tNear : 0 : 1.#INF;
+
+  return dst;
+};
+
+bool hit_scene(Ray ray, out HitRecord rec, out uint box_test_count) {
+  uint bvh_count, bvh_stride;
+  bvh.GetDimensions(bvh_count, bvh_stride);
+
+  int stack_count = 0;
+  uint stack[MAX_BVH_DEPTH];
+
+  stack[stack_count++] = bvh_count-1;
+
+  float closest = 100000.0f;
+  bool hit = false;
+
+  box_test_count = 0;
+
+  while (stack_count) {
+    BVHNode node = bvh[stack[--stack_count]];
+
+    if (node.children[0] >> 31) {
+      HitRecord temp;
+      if (intersect_triangle(ray, 0.0, closest, node.children[0] & ~(1 << 31), temp)) {
+        closest = temp.t;
+        rec = temp;
+        hit = true;
+      }
+    }
+    else{
+      box_test_count++;
+
+      float dists[2];
+      bool hits[2];
+
+      for (int i = 0; i < 2; ++i) {
+        dists[i] = ray_aabb_dst(ray, bvh[node.children[i]].min, bvh[node.children[i]].max);
+        hits[i] = dists[i] < closest;
+      }
+
+      uint closer_child = dists[0] < dists[1] ? 0 : 1;
+      uint further_child = (closer_child + 1) % 2;
+
+      if (hits[further_child] && stack_count < MAX_BVH_DEPTH) {
+        stack[stack_count++] = node.children[further_child];
+      }
+
+      if (hits[closer_child] && stack_count < MAX_BVH_DEPTH) {
+        stack[stack_count++] = node.children[closer_child];
+      }
+    }
+  }
+
+  return hit;
+}
+
+[numthreads(16, 16, 1)]
 void main( uint3 thread_id : SV_DispatchThreadID )
 {
   uint2 texel = thread_id.xy;
@@ -74,21 +151,14 @@ void main( uint3 thread_id : SV_DispatchThreadID )
   Ray ray;
   ray.o = camera_pos;
   ray.d = normalize(world_space - camera_pos);
+  ray.inv_d = 1.0f / ray.d;
 
-  float closest = 100000.0f;
-  bool hit = false;
   HitRecord rec;
+  uint box_test_count;
+  bool hit = hit_scene(ray, rec, box_test_count);
 
-  for (int i = 0; i < 12; ++i) {
-    HitRecord temp;
-    if (intersect_triangle(ray, 0.0, closest, i, temp)) {
-      closest = temp.t;
-      rec = temp;
-      hit = true;
-    }
-  }
-
-  float3 color = hit ? rec.n * 0.5f + 0.5f : 0.01f.xxx;
+  //float3 color =  ? rec.n * 0.5f + 0.5f : 0.01f.xxx;
+  float3 color = (float(box_test_count) / 1000.0f).xxx;
 
   if (all(texel < uint2(w, h))) {
     render_target[texel] = float4(sqrt(color), 0.0f);

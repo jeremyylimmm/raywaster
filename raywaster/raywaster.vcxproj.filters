@@ -21,12 +21,18 @@
     <ClCompile Include="src\model.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="src\bvh.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <FxCompile Include="src\shaders\test_compute.hlsl" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\model.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="src\bvh.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>
