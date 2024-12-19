@@ -37,18 +37,31 @@ struct FrameDependents {
   
   ID3D11Texture2D* rt0;
   ID3D11UnorderedAccessView* rt0_uav;
-  ID3D11RenderTargetView* rt0_rtv;
 
   ID3D11Texture2D* depth_buffer;
   ID3D11DepthStencilView* dsv;
+  ID3D11ShaderResourceView* depth_buffer_srv;
+
+  ID3D11Texture2D* gbuffer_albedo;
+  ID3D11Texture2D* gbuffer_normal;
+  ID3D11RenderTargetView* gbuffer_albedo_rtv;
+  ID3D11RenderTargetView* gbuffer_normal_rtv;
+  ID3D11ShaderResourceView* gbuffer_albedo_srv;
+  ID3D11ShaderResourceView* gbuffer_normal_srv;
 
   uint32_t w, h;
 
   void release() {
     if (swapchain_texture) {
+      gbuffer_normal_srv->Release();
+      gbuffer_albedo_srv->Release();
+      gbuffer_normal_rtv->Release();
+      gbuffer_albedo_rtv->Release();
+      gbuffer_normal->Release();
+      gbuffer_albedo->Release();
+      depth_buffer_srv->Release();
       dsv->Release();
       depth_buffer->Release();
-      rt0_rtv->Release();
       rt0_uav->Release();
       rt0->Release();
       swapchain_texture->Release();
@@ -82,12 +95,6 @@ struct FrameDependents {
 
     device->CreateUnorderedAccessView(rt0, &uav_desc, &rt0_uav);
 
-    D3D11_RENDER_TARGET_VIEW_DESC rtv_desc = {};
-    rtv_desc.Format = rt0_desc.Format;
-    rtv_desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
-
-    device->CreateRenderTargetView(rt0, &rtv_desc, &rt0_rtv);
-
     D3D11_TEXTURE2D_DESC depth_buffer_desc = {};
     depth_buffer_desc.Width = swapchain_desc.BufferDesc.Width;
     depth_buffer_desc.Height = swapchain_desc.BufferDesc.Height;
@@ -105,6 +112,63 @@ struct FrameDependents {
     dsv_desc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
 
     device->CreateDepthStencilView(depth_buffer, &dsv_desc, &dsv);
+
+    D3D11_SHADER_RESOURCE_VIEW_DESC depth_buffer_srv_desc = {};
+    depth_buffer_srv_desc.Format = DXGI_FORMAT_R32_FLOAT;
+    depth_buffer_srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    depth_buffer_srv_desc.Texture2D.MipLevels = 1;
+
+    device->CreateShaderResourceView(depth_buffer, &depth_buffer_srv_desc, &depth_buffer_srv);
+
+    D3D11_TEXTURE2D_DESC gbuffer_albedo_desc = {};
+    gbuffer_albedo_desc.Width = swapchain_desc.BufferDesc.Width;
+    gbuffer_albedo_desc.Height = swapchain_desc.BufferDesc.Height;
+    gbuffer_albedo_desc.MipLevels = 1;
+    gbuffer_albedo_desc.ArraySize = 1;
+    gbuffer_albedo_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    gbuffer_albedo_desc.SampleDesc.Count = 1;
+    gbuffer_albedo_desc.Usage = D3D11_USAGE_DEFAULT;
+    gbuffer_albedo_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+
+    device->CreateTexture2D(&gbuffer_albedo_desc, nullptr, &gbuffer_albedo);
+
+    D3D11_TEXTURE2D_DESC gbuffer_normal_desc = {};
+    gbuffer_normal_desc.Width = swapchain_desc.BufferDesc.Width;
+    gbuffer_normal_desc.Height = swapchain_desc.BufferDesc.Height;
+    gbuffer_normal_desc.MipLevels = 1;
+    gbuffer_normal_desc.ArraySize = 1;
+    gbuffer_normal_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    gbuffer_normal_desc.SampleDesc.Count = 1;
+    gbuffer_normal_desc.Usage = D3D11_USAGE_DEFAULT;
+    gbuffer_normal_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+
+    device->CreateTexture2D(&gbuffer_normal_desc, nullptr, &gbuffer_normal);
+
+    D3D11_RENDER_TARGET_VIEW_DESC gbuffer_albedo_rtv_desc = {};
+    gbuffer_albedo_rtv_desc.Format = gbuffer_albedo_desc.Format;
+    gbuffer_albedo_rtv_desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+
+    device->CreateRenderTargetView(gbuffer_albedo, &gbuffer_albedo_rtv_desc, &gbuffer_albedo_rtv);
+
+    D3D11_RENDER_TARGET_VIEW_DESC gbuffer_normal_rtv_desc = {};
+    gbuffer_normal_rtv_desc.Format = gbuffer_normal_desc.Format;
+    gbuffer_normal_rtv_desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+
+    device->CreateRenderTargetView(gbuffer_normal, &gbuffer_normal_rtv_desc, &gbuffer_normal_rtv);
+
+    D3D11_SHADER_RESOURCE_VIEW_DESC gbuffer_albedo_srv_desc = {};
+    gbuffer_albedo_srv_desc.Format = gbuffer_albedo_desc.Format;
+    gbuffer_albedo_srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    gbuffer_albedo_srv_desc.Texture2D.MipLevels = 1;
+
+    device->CreateShaderResourceView(gbuffer_albedo, &gbuffer_albedo_srv_desc, &gbuffer_albedo_srv);
+
+    D3D11_SHADER_RESOURCE_VIEW_DESC gbuffer_normal_srv_desc = {};
+    gbuffer_normal_srv_desc.Format = gbuffer_normal_desc.Format;
+    gbuffer_normal_srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    gbuffer_normal_srv_desc.Texture2D.MipLevels = 1;
+
+    device->CreateShaderResourceView(gbuffer_normal, &gbuffer_normal_srv_desc, &gbuffer_normal_srv);
   }
 };
 
@@ -325,22 +389,30 @@ int main() {
   FrameDependents frame_dependents = {};
   frame_dependents.init(device, swapchain);
 
-  std::vector<char> cs_code = load_bin("bin/test_compute.cso");
+  std::vector<char> lighting_cs_code = load_bin("bin/lighting_cs.cso");
   std::vector<char> gbuffer_vs_code = load_bin("bin/gbuffer_vs.cso");
   std::vector<char> gbuffer_ps_code = load_bin("bin/gbuffer_ps.cso");
 
-  ID3D11ComputeShader* compute_shader = nullptr;
-  device->CreateComputeShader(cs_code.data(), cs_code.size(), nullptr, &compute_shader);
+  ID3D11ComputeShader* lighting_cs = nullptr;
+  device->CreateComputeShader(lighting_cs_code.data(), lighting_cs_code.size(), nullptr, &lighting_cs);
   ID3D11ShaderReflection* cs_refl = nullptr;
-  D3DReflect(cs_code.data(), cs_code.size(), IID_PPV_ARGS(&cs_refl));
-  UINT cs_thread_group_x, cs_thread_group_y;
-  cs_refl->GetThreadGroupSize(&cs_thread_group_x, &cs_thread_group_y, nullptr);
+  D3DReflect(lighting_cs_code.data(), lighting_cs_code.size(), IID_PPV_ARGS(&cs_refl));
+  UINT lighting_cs_thread_group_x, lighting_cs_thread_group_y;
+  cs_refl->GetThreadGroupSize(&lighting_cs_thread_group_x, &lighting_cs_thread_group_y, nullptr);
   cs_refl->Release();
 
   ID3D11VertexShader* gbuffer_vs = nullptr;
   ID3D11PixelShader* gbuffer_ps = nullptr;
   device->CreateVertexShader(gbuffer_vs_code.data(), gbuffer_vs_code.size(), nullptr, &gbuffer_vs);
   device->CreatePixelShader(gbuffer_ps_code.data(), gbuffer_ps_code.size(), nullptr, &gbuffer_ps);
+
+  D3D11_DEPTH_STENCIL_DESC depth_state_desc = {};
+  depth_state_desc.DepthEnable = TRUE;
+  depth_state_desc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
+  depth_state_desc.DepthFunc = D3D11_COMPARISON_GREATER;
+
+  ID3D11DepthStencilState* depth_state = nullptr;
+  device->CreateDepthStencilState(&depth_state_desc, &depth_state);
 
   D3D11_BUFFER_DESC camera_cbuffer_desc = {};
   camera_cbuffer_desc.ByteWidth = sizeof(CameraCbuffer);
@@ -351,7 +423,7 @@ int main() {
   ID3D11Buffer* camera_cbuffer = nullptr;
   device->CreateBuffer(&camera_cbuffer_desc, nullptr, &camera_cbuffer);
 
-  Mesh mesh = combine_model(*load_gltf("models/suzanne/scene.gltf"));
+  Mesh mesh = combine_model(*load_gltf("models/test/scene.gltf"));
 
   std::vector<bvh::Node> bvh = bvh::construct_bvh(mesh.positions, mesh.indices);
 
@@ -403,8 +475,17 @@ int main() {
     .AddressW = D3D11_TEXTURE_ADDRESS_CLAMP,
   };
 
+  D3D11_SAMPLER_DESC point_clamp_sampler_desc = {
+    .Filter = D3D11_FILTER_MIN_MAG_MIP_POINT,
+    .AddressU = D3D11_TEXTURE_ADDRESS_CLAMP,
+    .AddressV = D3D11_TEXTURE_ADDRESS_CLAMP,
+    .AddressW = D3D11_TEXTURE_ADDRESS_CLAMP,
+  };
+
   ID3D11SamplerState* linear_wrap_sampler = nullptr;
+  ID3D11SamplerState* point_clamp_sampler = nullptr;
   device->CreateSamplerState(&linear_wrap_sampler_desc, &linear_wrap_sampler);
+  device->CreateSamplerState(&point_clamp_sampler_desc, &point_clamp_sampler);
 
   auto timer_start = std::chrono::steady_clock::now();
   int timer_count = 0;
@@ -467,7 +548,7 @@ int main() {
     }
 
     XMMATRIX view = XMMatrixLookAtRH(camera_offset + camera_focus, camera_focus, {0.0f, 1.0f, 0.0f});
-    XMMATRIX proj = XMMatrixPerspectiveFovRH(XM_PI*0.25f, (float)frame_dependents.w/(float)frame_dependents.h, 0.01f, 1000.0f);
+    XMMATRIX proj = XMMatrixPerspectiveFovRH(XM_PI*0.25f, (float)frame_dependents.w/(float)frame_dependents.h, 1000.0f, 0.01f);
     XMMATRIX view_proj = view * proj;
 
     D3D11_MAPPED_SUBRESOURCE mapped_camera_cbuffer;
@@ -480,12 +561,10 @@ int main() {
 
     ctx->Unmap(camera_cbuffer, 0);
 
-    /*
     float clear_color[4] = {};
-    ctx->ClearRenderTargetView(frame_dependents.rt0_rtv, clear_color);
-    ctx->ClearDepthStencilView(frame_dependents.dsv, D3D11_CLEAR_DEPTH, 1.0f, 0);
-
-    ctx->OMSetRenderTargets(1, &frame_dependents.rt0_rtv, frame_dependents.dsv);
+    ctx->ClearRenderTargetView(frame_dependents.gbuffer_albedo_rtv, clear_color);
+    ctx->ClearRenderTargetView(frame_dependents.gbuffer_normal_rtv, clear_color);
+    ctx->ClearDepthStencilView(frame_dependents.dsv, D3D11_CLEAR_DEPTH, 0.0f, 0);
 
     ctx->PSSetShader(gbuffer_ps, nullptr, 0);
     ctx->VSSetShader(gbuffer_vs, nullptr, 0);
@@ -517,29 +596,49 @@ int main() {
 
     ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
-    ctx->Draw((UINT)mesh.indices.size(), 0);
-    */
+    ID3D11RenderTargetView* render_targets_bind[] = {
+      frame_dependents.gbuffer_albedo_rtv,
+      frame_dependents.gbuffer_normal_rtv,
+    };
 
-    ///*
-    ctx->CSSetShader(compute_shader, nullptr, 0);
+    ctx->OMSetRenderTargets(std::size(render_targets_bind), render_targets_bind, frame_dependents.dsv);
+    ctx->OMSetDepthStencilState(depth_state, 0);
+
+    ctx->Draw((UINT)mesh.indices.size(), 0);
+
+    ctx->OMSetRenderTargets(0, nullptr, nullptr);
+
+    ctx->CSSetShader(lighting_cs, nullptr, 0);
 
     ctx->CSSetUnorderedAccessViews(0, 1, &frame_dependents.rt0_uav, nullptr);
     ctx->CSSetConstantBuffers(0, 1, &camera_cbuffer);
 
-    ID3D11ShaderResourceView* srvs_bind[] = {
+    ID3D11ShaderResourceView* cs_srvs_bind[] = {
       positions_srv,
       normals_srv,
       tex_coords_srv,
       indices_srv,
       bvh_srv,
-      hdri_srv
+      hdri_srv,
+      frame_dependents.depth_buffer_srv,
+      frame_dependents.gbuffer_albedo_srv,
+      frame_dependents.gbuffer_normal_srv,
     };
 
-    ctx->CSSetShaderResources(0, std::size(srvs_bind), srvs_bind);
-    ctx->CSSetSamplers(0, 1, &linear_wrap_sampler);
+    ctx->CSSetShaderResources(0, std::size(cs_srvs_bind), cs_srvs_bind);
 
-    ctx->Dispatch((frame_dependents.w+cs_thread_group_x-1)/cs_thread_group_x, (frame_dependents.h+cs_thread_group_y-1)/cs_thread_group_y, 1);
-    //*/
+    ID3D11SamplerState* samplers_bind[] = {
+      linear_wrap_sampler,
+      point_clamp_sampler
+    };
+
+    ctx->CSSetSamplers(0, std::size(samplers_bind), samplers_bind);
+
+    ctx->Dispatch((frame_dependents.w+lighting_cs_thread_group_x-1)/lighting_cs_thread_group_x, (frame_dependents.h+lighting_cs_thread_group_y-1)/lighting_cs_thread_group_y, 1);
+
+    // clear that shit
+    memset(cs_srvs_bind, 0, sizeof(cs_srvs_bind));
+    ctx->CSSetShaderResources(0, std::size(cs_srvs_bind), cs_srvs_bind);
 
     ctx->CopyResource(frame_dependents.swapchain_texture, frame_dependents.rt0);
 

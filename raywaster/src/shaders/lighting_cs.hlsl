@@ -22,8 +22,12 @@ StructuredBuffer<uint> indices : register(t3);
 StructuredBuffer<BVHNode> bvh : register(t4);
 
 Texture2D hdri : register(t5);
+Texture2D<float> depth_buffer : register(t6);
+Texture2D gbuffer_albedo : register(t7);
+Texture2D gbuffer_normal : register(t8);
 
 SamplerState linear_wrap_sampler : register(s0);
+SamplerState point_clamp_sampler : register(s1);
 
 struct Ray {
   float3 o;
@@ -144,6 +148,37 @@ float2 dir_to_equi(float3 d) {
   return float2(x, 1.0f-y);
 }
 
+Ray make_ray(float3 o, float3 d) {
+  Ray ray;
+  ray.o = o;
+  ray.d = d;
+  ray.inv_d = 1.0f / ray.d;
+  return ray;
+}
+
+float3 frag_func(float depth, float3 normal, float3 world, float3 camera_pos) {
+  float3 view_dir = normalize(camera_pos - world);
+
+  if (depth < 1e-6) {
+    float2 uv = dir_to_equi(-view_dir);
+    return hdri.SampleLevel(linear_wrap_sampler, uv, 0).rgb;
+  }
+
+  float3 light_dir = normalize(float3(1.0f, 1.0f, 1.0f));
+
+  Ray ray = make_ray(world + normal * 1e-6, light_dir);
+
+  HitRecord rec;
+  uint box_test_count;
+
+  if (hit_scene(ray, rec, box_test_count)) {
+    return 0.0f.rrr;
+  }
+  else{
+    return max(dot(normal, light_dir), 0.0f) * 1.0f.rrr;
+  }
+}
+
 [numthreads(16, 16, 1)]
 void main( uint3 thread_id : SV_DispatchThreadID )
 {
@@ -152,33 +187,17 @@ void main( uint3 thread_id : SV_DispatchThreadID )
   uint w, h;
   render_target.GetDimensions(w, h);
 
-  float2 uv = float2(texel.x, h-texel.y-1) / float2((float)w, (float)h);
-  float2 ndc = uv * 2.0f - 1.0f;
-  
-  float4 world_space_hom = mul(inv_view_proj, float4(ndc, 0.5f, 1.0f));
-  float3 world_space = world_space_hom.xyz / world_space_hom.w;
+  float2 screen_uv = float2(texel.x, texel.y) / float2((float)w, (float)h);
 
   float3 camera_pos = mul(inv_view, float4(0.0f, 0.0f, 0.0f, 1.0f)).xyz;
+  float depth = depth_buffer.SampleLevel(point_clamp_sampler, screen_uv, 0);
+  float3 normal = gbuffer_normal.SampleLevel(point_clamp_sampler, screen_uv, 0).xyz * 2.0f - 1.0f;
 
-  Ray ray;
-  ray.o = camera_pos;
-  ray.d = normalize(world_space - camera_pos);
-  ray.inv_d = 1.0f / ray.d;
+  float4 ndc = float4(screen_uv.x * 2.0f - 1.0, screen_uv.y * -2.0f + 1.0f, depth, 1.0f);
+  float4 hom = mul(inv_view_proj, ndc);
+  float3 world = hom.xyz / hom.w;
 
-  HitRecord rec;
-  uint box_test_count;
-
-  float3 color;
-
-  if (hit_scene(ray, rec, box_test_count)) {
-    color = rec.n * 0.5f + 0.5f;
-  }
-  else{
-    float2 uv = dir_to_equi(ray.d);
-    color = hdri.SampleLevel(linear_wrap_sampler, uv, 0).xyz;
-  }
-
-  //float3 color = (float(box_test_count) / 1000.0f).xxx;
+  float3 color = frag_func(depth, normal, world, camera_pos);
 
   if (all(texel < uint2(w, h))) {
     render_target[texel] = float4(sqrt(color), 0.0f);
