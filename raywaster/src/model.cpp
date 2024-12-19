@@ -112,9 +112,73 @@ std::optional<Model> load_gltf(const char* path) {
     }
   }
 
+  std::vector<std::pair<XMMATRIX, cgltf_node*>> stack;
+
+  for (int i = 0; i < data->scene->nodes_count; ++i) {
+    stack.push_back({XMMatrixIdentity(), data->scene->nodes[i]});
+  }
+
+  std::vector<Instance> instances;
+
+  while (!stack.empty()) {
+    auto [parent_transform, node] = stack.back(); 
+    stack.pop_back();
+
+    XMMATRIX local_transform = XMMatrixIdentity();
+
+    if (node->has_matrix) {
+      assert(false);
+    }
+    else {
+      XMVECTOR translation;
+      XMVECTOR rotation;
+      XMVECTOR scaling;
+
+      if (node->has_translation) {
+        memcpy(&translation, node->translation, sizeof(node->translation));
+      }
+      else {
+        translation = XMVectorZero();
+      }
+
+      if (node->has_rotation) {
+        memcpy(&rotation, node->rotation, sizeof(node->rotation));
+      }
+      else {
+        rotation = XMQuaternionIdentity();
+      }
+
+      if (node->has_scale) {
+        memcpy(&scaling, node->scale, sizeof(node->scale));
+      }
+      else {
+        scaling = XMVectorSplatOne();
+      }
+
+      local_transform = XMMatrixScalingFromVector(scaling) * XMMatrixRotationQuaternion(rotation) * XMMatrixTranslationFromVector(translation);
+    }
+
+    XMMATRIX transform = local_transform * parent_transform;
+
+    if (node->mesh) {
+      for (int i = 0; i < node->mesh->primitives_count; ++i) {
+        size_t mesh = mesh_first_primitives[node->mesh - data->meshes] + i; 
+        instances.push_back(Instance{
+          .mesh = mesh,
+          .transform = transform
+        });
+      }
+    }
+
+    for (int i = 0; i < node->children_count; ++i) {
+      stack.push_back({transform, node->children[i]});
+    }
+  }
+
   cgltf_free(data);
 
   return Model {
-    .meshes = meshes
+    .meshes = meshes,
+    .instances = instances
   };
 }

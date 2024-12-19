@@ -4,6 +4,8 @@
 #include <d3dcompiler.h>
 #include <DirectXMath.h>
 
+#include <algorithm>
+
 #include <iostream>
 #include <utility>
 #include <optional>
@@ -15,6 +17,9 @@
 #include "model.h"
 #include "bvh.h"
 
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+
 using namespace DirectX;
 
 static constexpr DXGI_FORMAT SWAPCHAIN_FORMAT = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -23,6 +28,8 @@ static struct {
   bool closed;
   std::optional<std::pair<int32_t, int32_t>> resize;
   bool resized;
+  XMFLOAT2 mouse_delta;
+  float scroll_delta;
 } window_events;
 
 struct FrameDependents {
@@ -86,6 +93,53 @@ static LRESULT window_proc(HWND window, UINT msg, WPARAM w_param, LPARAM l_param
         }
       }
     } break;
+
+    case WM_MBUTTONDOWN: {
+      RECT rect;
+      GetClientRect(window, &rect);
+
+      int32_t x = LOWORD(l_param);
+      int32_t y = HIWORD(l_param);
+
+      if (x > rect.left && x < rect.right && y > rect.top && y < rect.bottom) {
+        SetCapture(window);
+        ShowCursor(false);
+
+        RECT screen_rect;
+        GetWindowRect(window, &screen_rect);
+
+        ClipCursor(&screen_rect);
+      }
+    } break;
+
+    case WM_MBUTTONUP: {
+      if (window == GetCapture()) {
+        ShowCursor(true);
+        ReleaseCapture();
+        ClipCursor(NULL);
+      }
+    } break;
+
+    case WM_INPUT: {
+      UINT size;
+
+      GetRawInputData((HRAWINPUT)l_param, RID_INPUT, NULL, &size, sizeof(RAWINPUTHEADER));
+      std::vector<char> lpb(size);
+
+      GetRawInputData((HRAWINPUT)l_param, RID_INPUT, lpb.data(), &size, sizeof(RAWINPUTHEADER));
+
+      RAWINPUT* raw = (RAWINPUT*)lpb.data();
+
+      if (raw->header.dwType == RIM_TYPEMOUSE) {
+        window_events.mouse_delta.x += raw->data.mouse.lLastX;
+        window_events.mouse_delta.y += raw->data.mouse.lLastY;
+      }
+    } break;
+
+    case WM_MOUSEWHEEL: {
+      float delta = (float)GET_WHEEL_DELTA_WPARAM(w_param);
+      window_events.scroll_delta += delta;
+    } break;
   }
 
   return DefWindowProcA(window, msg, w_param, l_param);
@@ -142,6 +196,53 @@ static std::pair<ID3D11Buffer*, ID3D11ShaderResourceView*> create_immutable_stru
   return {buffer, srv};
 }
 
+static Mesh combine_model(const Model& model) {
+  std::vector<XMFLOAT3> positions;
+  std::vector<XMFLOAT3> normals;
+  std::vector<XMFLOAT2> tex_coords;
+  std::vector<uint32_t> indices;
+
+  uint32_t indices_offset = 0; 
+
+  for (auto& instance : model.instances) {
+    auto& mesh = model.meshes[instance.mesh];
+
+    for (auto idx : mesh.indices) {
+      indices.push_back(indices_offset + idx);
+    }
+
+    for (auto pos : mesh.positions) {
+      XMVECTOR p = {pos.x, pos.y, pos.z, 1.0f};
+      p = XMVector4Transform(p, instance.transform);
+      XMStoreFloat3(&pos, p);
+      positions.push_back(pos);
+    }
+
+    for (auto norm : mesh.normals) {
+      XMVECTOR n = {norm.x, norm.y, norm.z, 0.0f};
+      n = XMVector3Normalize(XMVector4Transform(n, instance.transform));
+      XMStoreFloat3(&norm, n);
+      normals.push_back(norm);
+    }
+
+    for (auto tc : mesh.tex_coords) {
+      tex_coords.push_back(tc);
+    }
+
+    assert(positions.size() == normals.size());
+    assert(positions.size() == tex_coords.size());
+
+    indices_offset = (uint32_t)positions.size();
+  }
+
+  return Mesh {
+    .positions = positions,
+    .normals = normals,
+    .tex_coords = tex_coords,
+    .indices = indices
+  };
+}
+
 int main() {
   WNDCLASSA wc = {
     .lpfnWndProc = window_proc,
@@ -150,6 +251,13 @@ int main() {
   };
 
   RegisterClassA(&wc);
+
+  RAWINPUTDEVICE rid = {
+    .usUsagePage = 0x01,
+    .usUsage = 0x02, // mouse
+  };
+
+  RegisterRawInputDevices(&rid, 1, sizeof(rid));
 
   HWND window = CreateWindowExA(0, wc.lpszClassName, "Raywaster", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, nullptr, nullptr, wc.hInstance, nullptr);
   ShowWindow(window, SW_SHOWDEFAULT);
@@ -207,20 +315,70 @@ int main() {
   ID3D11Buffer* camera_cbuffer = nullptr;
   device->CreateBuffer(&camera_cbuffer_desc, nullptr, &camera_cbuffer);
 
-  Model model = *load_gltf("models/damaged_helmet_embedded/scene.gltf");
+  Mesh mesh = combine_model(*load_gltf("models/suzanne/scene.gltf"));
 
-  Mesh& mesh0 = model.meshes[0];
+  std::vector<bvh::Node> bvh = bvh::construct_bvh(mesh.positions, mesh.indices);
 
-  std::vector<bvh::Node> bvh = bvh::construct_bvh(mesh0.positions, mesh0.indices);
-  (void)bvh;
-
-  auto [positions_buf, positions_srv]   = create_immutable_structured_buffer<XMFLOAT3>(device, mesh0.positions.data(), mesh0.positions.size());
-  auto [normals_buf, normals_srv]       = create_immutable_structured_buffer<XMFLOAT3>(device, mesh0.normals.data(), mesh0.normals.size());
-  auto [tex_coords_buf, tex_coords_srv] = create_immutable_structured_buffer<XMFLOAT2>(device, mesh0.tex_coords.data(), mesh0.tex_coords.size());
-  auto [indices_buf, indices_srv]       = create_immutable_structured_buffer<uint32_t>(device, mesh0.indices.data(), mesh0.indices.size());
+  auto [positions_buf, positions_srv]   = create_immutable_structured_buffer<XMFLOAT3>(device, mesh.positions.data(),  mesh.positions.size());
+  auto [normals_buf, normals_srv]       = create_immutable_structured_buffer<XMFLOAT3>(device, mesh.normals.data(),    mesh.normals.size());
+  auto [tex_coords_buf, tex_coords_srv] = create_immutable_structured_buffer<XMFLOAT2>(device, mesh.tex_coords.data(), mesh.tex_coords.size());
+  auto [indices_buf, indices_srv]       = create_immutable_structured_buffer<uint32_t>(device, mesh.indices.data(),    mesh.indices.size());
   auto [bvh_buf, bvh_srv]               = create_immutable_structured_buffer<bvh::Node>(device, bvh.data(), bvh.size());
 
-  auto start = std::chrono::steady_clock::now();
+  int hdri_w, hdri_h;
+  float* hdri_data = stbi_loadf("sky/symmetrical_garden_02_4k.hdr", &hdri_w, &hdri_h, nullptr, 3);
+
+  if (!hdri_data) {
+    std::cout << "Failed to load hdri\n";
+    return 1;
+  }
+
+  D3D11_TEXTURE2D_DESC hdri_desc = {};
+  hdri_desc.Width = hdri_w;
+  hdri_desc.Height = hdri_h;
+  hdri_desc.MipLevels = 1;
+  hdri_desc.ArraySize = 1;
+  hdri_desc.Format = DXGI_FORMAT_R32G32B32_FLOAT;
+  hdri_desc.SampleDesc.Count = 1;
+  hdri_desc.Usage = D3D11_USAGE_IMMUTABLE;
+  hdri_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+
+  D3D11_SUBRESOURCE_DATA hdri_subresource_data = {
+    .pSysMem = hdri_data,
+    .SysMemPitch = hdri_w * 3 * sizeof(float),
+    .SysMemSlicePitch = 1
+  };
+
+  ID3D11Texture2D* hdri = nullptr;
+  device->CreateTexture2D(&hdri_desc, &hdri_subresource_data,&hdri);
+
+  D3D11_SHADER_RESOURCE_VIEW_DESC hdri_srv_desc = {};
+  hdri_srv_desc.Format = hdri_desc.Format;
+  hdri_srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+  hdri_srv_desc.Texture2D.MipLevels = 1;
+
+  ID3D11ShaderResourceView* hdri_srv = nullptr;
+  device->CreateShaderResourceView(hdri, &hdri_srv_desc, &hdri_srv);
+
+  D3D11_SAMPLER_DESC linear_wrap_sampler_desc = {
+    .Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR,
+    .AddressU = D3D11_TEXTURE_ADDRESS_WRAP,
+    .AddressV = D3D11_TEXTURE_ADDRESS_WRAP,
+    .AddressW = D3D11_TEXTURE_ADDRESS_CLAMP,
+  };
+
+  ID3D11SamplerState* linear_wrap_sampler = nullptr;
+  device->CreateSamplerState(&linear_wrap_sampler_desc, &linear_wrap_sampler);
+
+  auto timer_start = std::chrono::steady_clock::now();
+  int timer_count = 0;
+
+  XMVECTOR camera_focus = {0.0f, 0.0f, 0.0f};
+  float camera_theta = XM_PI * 0.5f;
+  float camera_phi = XM_PI * 0.25f;
+  float camera_distance = 6.0f;
+  float camera_sensitivity = 2e-3f;
+  float camera_speed = 2e-3f;
 
   for (;;) {
     window_events = {};
@@ -244,10 +402,37 @@ int main() {
 
     ctx->CSSetShader(compute_shader, nullptr, 0);
 
-    auto now = std::chrono::steady_clock::now();
-    float time = (float)std::chrono::duration_cast<std::chrono::microseconds>(now - start).count() * 1e-6f;
+    XMVECTOR camera_offset = {
+      camera_distance * std::sin(camera_phi) * std::cos(camera_theta),
+      camera_distance * std::cos(camera_phi),
+      camera_distance * std::sin(camera_phi) * std::sin(camera_theta),
+    };
 
-    XMMATRIX view = XMMatrixLookAtRH({cosf(time) * 6.0f, 2.0f, sinf(time) * 6.0f}, {0.0f, 0.5f, 0.0f}, {0.0f, 1.0f, 0.0f});
+    XMVECTOR camera_right = XMVector3Normalize(XMVector3Cross({0.0f, 1.0f, 0.0f}, XMVector3Normalize(camera_offset)));
+    XMVECTOR camera_up = XMVector3Normalize(XMVector3Cross(XMVector3Normalize(camera_offset), camera_right));
+
+    if (GetCapture() == window) {
+      if (GetKeyState(VK_SHIFT) & 0x8000) {
+        camera_focus -= camera_right * camera_speed * window_events.mouse_delta.x;
+        camera_focus += camera_up * camera_speed * window_events.mouse_delta.y;
+      }
+      else {
+        camera_theta += camera_sensitivity * window_events.mouse_delta.x;
+        camera_phi = std::clamp(camera_phi - camera_sensitivity * window_events.mouse_delta.y, XM_PI*0.05f, XM_PI*0.95f);
+      }
+    }
+
+    POINT cursor_pos;
+    GetCursorPos(&cursor_pos);
+
+    RECT window_rect;
+    GetWindowRect(window, &window_rect);
+
+    if (GetFocus() == window && cursor_pos.x > window_rect.left && cursor_pos.x < window_rect.right && cursor_pos.y > window_rect.top && cursor_pos.y < window_rect.bottom) {
+      camera_distance -= camera_distance * 1e-3f * window_events.scroll_delta;
+    }
+
+    XMMATRIX view = XMMatrixLookAtRH(camera_offset + camera_focus, camera_focus, {0.0f, 1.0f, 0.0f});
     XMMATRIX proj = XMMatrixPerspectiveFovRH(XM_PI*0.25f, (float)frame_dependents.w/(float)frame_dependents.h, 0.01f, 1000.0f);
 
     D3D11_MAPPED_SUBRESOURCE mapped_camera_cbuffer;
@@ -267,16 +452,27 @@ int main() {
       normals_srv,
       tex_coords_srv,
       indices_srv,
-      bvh_srv
+      bvh_srv,
+      hdri_srv
     };
 
     ctx->CSSetShaderResources(0, std::size(srvs_bind), srvs_bind);
+    ctx->CSSetSamplers(0, 1, &linear_wrap_sampler);
 
     ctx->Dispatch((frame_dependents.w+cs_thread_group_x-1)/cs_thread_group_x, (frame_dependents.h+cs_thread_group_y-1)/cs_thread_group_y, 1);
 
     ctx->CopyResource(frame_dependents.swapchain_texture, frame_dependents.rt0);
 
     swapchain->Present(0, 0);
+
+    if (++timer_count == 256) {
+      auto timer_end = std::chrono::steady_clock::now();
+      auto diff = (float)std::chrono::duration_cast<std::chrono::microseconds>(timer_end-timer_start).count()/float(timer_count) * 1e-3;
+      std::cout << std::format("frame-time: {} ms\n",  diff);
+
+      timer_count = 0;
+      timer_start = timer_end;
+    }
   }
 
   return 0;

@@ -1,4 +1,5 @@
 #define MAX_BVH_DEPTH 32
+#define PI 3.14159265f
 
 struct BVHNode {
   float3 min;
@@ -18,6 +19,10 @@ StructuredBuffer<float3> normals : register(t1);
 StructuredBuffer<float2> tex_coords : register(t2);
 StructuredBuffer<uint> indices : register(t3);
 StructuredBuffer<BVHNode> bvh : register(t4);
+
+Texture2D hdri : register(t5);
+
+SamplerState linear_wrap_sampler : register(s0);
 
 struct Ray {
   float3 o;
@@ -132,6 +137,12 @@ bool hit_scene(Ray ray, out HitRecord rec, out uint box_test_count) {
   return hit;
 }
 
+float2 dir_to_equi(float3 d) {
+  float x = (atan2(d.x, d.z) * 1.0f/PI) * 0.5f + 0.5f;
+  float y = (asin(d.y) * 2.0f/PI) * 0.5f + 0.5f;
+  return float2(x, 1.0f-y);
+}
+
 [numthreads(16, 16, 1)]
 void main( uint3 thread_id : SV_DispatchThreadID )
 {
@@ -155,10 +166,18 @@ void main( uint3 thread_id : SV_DispatchThreadID )
 
   HitRecord rec;
   uint box_test_count;
-  bool hit = hit_scene(ray, rec, box_test_count);
 
-  //float3 color =  ? rec.n * 0.5f + 0.5f : 0.01f.xxx;
-  float3 color = (float(box_test_count) / 1000.0f).xxx;
+  float3 color;
+
+  if (hit_scene(ray, rec, box_test_count)) {
+    color = rec.n * 0.5f + 0.5f;
+  }
+  else{
+    float2 uv = dir_to_equi(ray.d);
+    color = hdri.SampleLevel(linear_wrap_sampler, uv, 0).xyz;
+  }
+
+  //float3 color = (float(box_test_count) / 1000.0f).xxx;
 
   if (all(texel < uint2(w, h))) {
     render_target[texel] = float4(sqrt(color), 0.0f);

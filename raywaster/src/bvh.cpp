@@ -3,6 +3,8 @@
 
 #include "bvh.h"
 
+#define ENABLE_SAH
+
 namespace bvh {
 
   struct Tri {
@@ -35,6 +37,7 @@ namespace bvh {
   }
 
   static size_t pick_split(const std::span<Tri>& tris) {
+#ifdef ENABLE_SAH
     size_t split_count = std::min(tris.size(), (size_t)10);
     size_t split_interval = tris.size()/split_count;
 
@@ -65,6 +68,9 @@ namespace bvh {
     }
 
     return best;
+#else
+    return tris.size()/2;
+#endif
   }
 
   static uint32_t split(std::vector<Node>& nodes, const std::span<Tri>& tris) {

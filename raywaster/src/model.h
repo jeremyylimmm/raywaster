@@ -13,8 +13,14 @@ struct Mesh {
   std::vector<uint32_t> indices;
 };
 
+struct Instance {
+  size_t mesh;
+  XMMATRIX transform;
+};
+
 struct Model {
   std::vector<Mesh> meshes;
+  std::vector<Instance> instances;
 };
 
 std::optional<Model> load_gltf(const char* path);
