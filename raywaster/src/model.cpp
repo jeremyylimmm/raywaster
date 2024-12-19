@@ -92,14 +92,21 @@ std::optional<Model> load_gltf(const char* path) {
         case cgltf_component_type_r_16u: {
           uint16_t* ind_data = accessor_data<uint16_t>(ind_acc);
           indices.reserve(ind_acc->count);
-          for (int i = 0; i < ind_acc->count; ++i) {
-            indices.push_back(ind_data[i]);
+          for (int i = 0; i < ind_acc->count/3; ++i) {
+            indices.push_back(ind_data[i*3+0]);
+            indices.push_back(ind_data[i*3+2]);
+            indices.push_back(ind_data[i*3+1]);
           }
         } break;
 
         case cgltf_component_type_r_32u: {
           uint32_t* ind_data = accessor_data<uint32_t>(ind_acc);
-          indices = std::vector<uint32_t>(ind_data, ind_data + ind_acc->count);
+          indices.reserve(ind_acc->count);
+          for (int i = 0; i < ind_acc->count/3; ++i) {
+            indices.push_back(ind_data[i*3+0]);
+            indices.push_back(ind_data[i*3+2]);
+            indices.push_back(ind_data[i*3+1]);
+          }
         } break;
       }
 

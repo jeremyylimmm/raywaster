@@ -27,6 +27,8 @@
   </ItemGroup>
   <ItemGroup>
     <FxCompile Include="src\shaders\test_compute.hlsl" />
+    <FxCompile Include="src\shaders\gbuffer_vs.hlsl" />
+    <FxCompile Include="src\shaders\gbuffer_ps.hlsl" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\model.h">
@@ -35,5 +37,8 @@
     <ClInclude Include="src\bvh.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="src\shaders\gbuffer.hlsli" />
   </ItemGroup>
 </Project>

@@ -37,11 +37,18 @@ struct FrameDependents {
   
   ID3D11Texture2D* rt0;
   ID3D11UnorderedAccessView* rt0_uav;
+  ID3D11RenderTargetView* rt0_rtv;
+
+  ID3D11Texture2D* depth_buffer;
+  ID3D11DepthStencilView* dsv;
 
   uint32_t w, h;
 
   void release() {
     if (swapchain_texture) {
+      dsv->Release();
+      depth_buffer->Release();
+      rt0_rtv->Release();
       rt0_uav->Release();
       rt0->Release();
       swapchain_texture->Release();
@@ -65,7 +72,7 @@ struct FrameDependents {
     rt0_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     rt0_desc.SampleDesc.Count = 1;
     rt0_desc.Usage = D3D11_USAGE_DEFAULT;
-    rt0_desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+    rt0_desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_RENDER_TARGET;
 
     device->CreateTexture2D(&rt0_desc, nullptr, &rt0);
 
@@ -74,6 +81,30 @@ struct FrameDependents {
     uav_desc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
 
     device->CreateUnorderedAccessView(rt0, &uav_desc, &rt0_uav);
+
+    D3D11_RENDER_TARGET_VIEW_DESC rtv_desc = {};
+    rtv_desc.Format = rt0_desc.Format;
+    rtv_desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+
+    device->CreateRenderTargetView(rt0, &rtv_desc, &rt0_rtv);
+
+    D3D11_TEXTURE2D_DESC depth_buffer_desc = {};
+    depth_buffer_desc.Width = swapchain_desc.BufferDesc.Width;
+    depth_buffer_desc.Height = swapchain_desc.BufferDesc.Height;
+    depth_buffer_desc.MipLevels = 1;
+    depth_buffer_desc.ArraySize = 1;
+    depth_buffer_desc.Format = DXGI_FORMAT_R32_TYPELESS;
+    depth_buffer_desc.SampleDesc.Count = 1;
+    depth_buffer_desc.Usage = D3D11_USAGE_DEFAULT;
+    depth_buffer_desc.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
+
+    device->CreateTexture2D(&depth_buffer_desc, nullptr, &depth_buffer);
+
+    D3D11_DEPTH_STENCIL_VIEW_DESC dsv_desc = {};
+    dsv_desc.Format = DXGI_FORMAT_D32_FLOAT;
+    dsv_desc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+
+    device->CreateDepthStencilView(depth_buffer, &dsv_desc, &dsv);
   }
 };
 
@@ -163,6 +194,7 @@ static std::vector<char> load_bin(const char* path) {
 struct CameraCbuffer {
   XMMATRIX inv_view;
   XMMATRIX inv_view_proj;
+  XMMATRIX view_proj;
 };
 
 template<typename T>
@@ -294,17 +326,21 @@ int main() {
   frame_dependents.init(device, swapchain);
 
   std::vector<char> cs_code = load_bin("bin/test_compute.cso");
+  std::vector<char> gbuffer_vs_code = load_bin("bin/gbuffer_vs.cso");
+  std::vector<char> gbuffer_ps_code = load_bin("bin/gbuffer_ps.cso");
 
   ID3D11ComputeShader* compute_shader = nullptr;
   device->CreateComputeShader(cs_code.data(), cs_code.size(), nullptr, &compute_shader);
-
   ID3D11ShaderReflection* cs_refl = nullptr;
   D3DReflect(cs_code.data(), cs_code.size(), IID_PPV_ARGS(&cs_refl));
-
   UINT cs_thread_group_x, cs_thread_group_y;
   cs_refl->GetThreadGroupSize(&cs_thread_group_x, &cs_thread_group_y, nullptr);
-
   cs_refl->Release();
+
+  ID3D11VertexShader* gbuffer_vs = nullptr;
+  ID3D11PixelShader* gbuffer_ps = nullptr;
+  device->CreateVertexShader(gbuffer_vs_code.data(), gbuffer_vs_code.size(), nullptr, &gbuffer_vs);
+  device->CreatePixelShader(gbuffer_ps_code.data(), gbuffer_ps_code.size(), nullptr, &gbuffer_ps);
 
   D3D11_BUFFER_DESC camera_cbuffer_desc = {};
   camera_cbuffer_desc.ByteWidth = sizeof(CameraCbuffer);
@@ -400,8 +436,6 @@ int main() {
       frame_dependents.init(device, swapchain);
     }
 
-    ctx->CSSetShader(compute_shader, nullptr, 0);
-
     XMVECTOR camera_offset = {
       camera_distance * std::sin(camera_phi) * std::cos(camera_theta),
       camera_distance * std::cos(camera_phi),
@@ -434,15 +468,60 @@ int main() {
 
     XMMATRIX view = XMMatrixLookAtRH(camera_offset + camera_focus, camera_focus, {0.0f, 1.0f, 0.0f});
     XMMATRIX proj = XMMatrixPerspectiveFovRH(XM_PI*0.25f, (float)frame_dependents.w/(float)frame_dependents.h, 0.01f, 1000.0f);
+    XMMATRIX view_proj = view * proj;
 
     D3D11_MAPPED_SUBRESOURCE mapped_camera_cbuffer;
     ctx->Map(camera_cbuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped_camera_cbuffer);
 
     CameraCbuffer* camera_cbuffer_data = (CameraCbuffer*)mapped_camera_cbuffer.pData;
     camera_cbuffer_data->inv_view = XMMatrixInverse(nullptr, view);
-    camera_cbuffer_data->inv_view_proj = XMMatrixInverse(nullptr, view * proj);
+    camera_cbuffer_data->inv_view_proj = XMMatrixInverse(nullptr, view_proj);
+    camera_cbuffer_data->view_proj = view_proj;
 
     ctx->Unmap(camera_cbuffer, 0);
+
+    /*
+    float clear_color[4] = {};
+    ctx->ClearRenderTargetView(frame_dependents.rt0_rtv, clear_color);
+    ctx->ClearDepthStencilView(frame_dependents.dsv, D3D11_CLEAR_DEPTH, 1.0f, 0);
+
+    ctx->OMSetRenderTargets(1, &frame_dependents.rt0_rtv, frame_dependents.dsv);
+
+    ctx->PSSetShader(gbuffer_ps, nullptr, 0);
+    ctx->VSSetShader(gbuffer_vs, nullptr, 0);
+
+    ctx->VSSetConstantBuffers(0, 1, &camera_cbuffer);
+
+    ID3D11ShaderResourceView* gbuffer_srvs_bind[] = {
+      positions_srv,
+      normals_srv,
+      tex_coords_srv,
+      indices_srv,
+    };
+
+    ctx->VSSetShaderResources(0, std::size(gbuffer_srvs_bind), gbuffer_srvs_bind);
+
+    D3D11_VIEWPORT viewport = {
+      .Width  = (float)frame_dependents.w,
+      .Height = (float)frame_dependents.h,
+      .MaxDepth = 1.0f
+    };
+
+    D3D11_RECT scissor = {
+      .right  = (LONG)frame_dependents.w,
+      .bottom = (LONG)frame_dependents.h,
+    };
+
+    ctx->RSSetViewports(1, &viewport);
+    ctx->RSSetScissorRects(1, &scissor);
+
+    ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+    ctx->Draw((UINT)mesh.indices.size(), 0);
+    */
+
+    ///*
+    ctx->CSSetShader(compute_shader, nullptr, 0);
 
     ctx->CSSetUnorderedAccessViews(0, 1, &frame_dependents.rt0_uav, nullptr);
     ctx->CSSetConstantBuffers(0, 1, &camera_cbuffer);
@@ -460,6 +539,7 @@ int main() {
     ctx->CSSetSamplers(0, 1, &linear_wrap_sampler);
 
     ctx->Dispatch((frame_dependents.w+cs_thread_group_x-1)/cs_thread_group_x, (frame_dependents.h+cs_thread_group_y-1)/cs_thread_group_y, 1);
+    //*/
 
     ctx->CopyResource(frame_dependents.swapchain_texture, frame_dependents.rt0);
 

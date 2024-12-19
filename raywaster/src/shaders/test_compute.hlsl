@@ -12,6 +12,7 @@ RWTexture2D<float4> render_target : register(u0);
 cbuffer Camera : register(b0) {
   float4x4 inv_view;
   float4x4 inv_view_proj;
+  float4x4 view_proj;
 };
 
 StructuredBuffer<float3> positions : register(t0);
@@ -45,8 +46,8 @@ struct HitRecord {
 //https://stackoverflow.com/questions/42740765/intersection-between-line-and-triangle-in-3d/42752998#42752998
 bool intersect_triangle(Ray r, float tmin, float tmax, uint tri_idx, out HitRecord rec) { 
   uint i0 = indices[tri_idx*3+0];
-  uint i1 = indices[tri_idx*3+1];
-  uint i2 = indices[tri_idx*3+2];
+  uint i1 = indices[tri_idx*3+2];
+  uint i2 = indices[tri_idx*3+1];
 
   float3 E1 = positions[i1]-positions[i0];
   float3 E2 = positions[i2]-positions[i0];
