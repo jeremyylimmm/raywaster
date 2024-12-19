@@ -190,14 +190,14 @@ void main( uint3 thread_id : SV_DispatchThreadID )
   float2 screen_uv = float2(texel.x, texel.y) / float2((float)w, (float)h);
 
   float3 camera_pos = mul(inv_view, float4(0.0f, 0.0f, 0.0f, 1.0f)).xyz;
-  float depth = depth_buffer.SampleLevel(point_clamp_sampler, screen_uv, 0);
-  float3 normal = gbuffer_normal.SampleLevel(point_clamp_sampler, screen_uv, 0).xyz * 2.0f - 1.0f;
+  float depth = depth_buffer.Sample(point_clamp_sampler, screen_uv, 2);
+  float3 normal = gbuffer_normal.SampleLevel(point_clamp_sampler, screen_uv, 2).xyz * 2.0f - 1.0f;
 
   float4 ndc = float4(screen_uv.x * 2.0f - 1.0, screen_uv.y * -2.0f + 1.0f, depth, 1.0f);
   float4 hom = mul(inv_view_proj, ndc);
   float3 world = hom.xyz / hom.w;
 
-  float3 color = frag_func(depth, normal, world, camera_pos);
+  float3 color = normal * 0.5f + 0.5f;//frag_func(depth, normal, world, camera_pos);
 
   if (all(texel < uint2(w, h))) {
     render_target[texel] = float4(sqrt(color), 0.0f);

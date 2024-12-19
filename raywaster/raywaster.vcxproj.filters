@@ -29,6 +29,8 @@
     <FxCompile Include="src\shaders\lighting_cs.hlsl" />
     <FxCompile Include="src\shaders\gbuffer_vs.hlsl" />
     <FxCompile Include="src\shaders\gbuffer_ps.hlsl" />
+    <FxCompile Include="src\shaders\screen_quad_vs.hlsl" />
+    <FxCompile Include="src\shaders\combine_ps.hlsl" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\model.h">
@@ -40,5 +42,6 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="src\shaders\gbuffer.hlsli" />
+    <None Include="src\shaders\screen_quad.hlsli" />
   </ItemGroup>
 </Project>
