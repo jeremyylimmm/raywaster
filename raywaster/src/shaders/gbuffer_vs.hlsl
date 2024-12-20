@@ -4,6 +4,7 @@ cbuffer Camera : register(b0) {
   float4x4 inv_view;
   float4x4 inv_view_proj;
   float4x4 view_proj;
+  uint frame;
 };
 
 StructuredBuffer<float3> positions : register(t0);

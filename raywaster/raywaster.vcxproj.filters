@@ -43,5 +43,6 @@
   <ItemGroup>
     <None Include="src\shaders\gbuffer.hlsli" />
     <None Include="src\shaders\screen_quad.hlsli" />
+    <None Include="src\shaders\common.hlsli" />
   </ItemGroup>
 </Project>

@@ -1,5 +1,8 @@
+#include "common.hlsli"
+
 #define MAX_BVH_DEPTH 32
-#define PI 3.14159265f
+
+#define BOUNCE_LIMIT 4
 
 struct BVHNode {
   float3 min;
@@ -13,6 +16,7 @@ cbuffer Camera : register(b0) {
   float4x4 inv_view;
   float4x4 inv_view_proj;
   float4x4 view_proj;
+  uint frame;
 };
 
 StructuredBuffer<float3> positions : register(t0);
@@ -21,7 +25,7 @@ StructuredBuffer<float2> tex_coords : register(t2);
 StructuredBuffer<uint> indices : register(t3);
 StructuredBuffer<BVHNode> bvh : register(t4);
 
-Texture2D hdri : register(t5);
+Texture2D<float3> hdri : register(t5);
 Texture2D<float> depth_buffer : register(t6);
 Texture2D gbuffer_albedo : register(t7);
 Texture2D gbuffer_normal : register(t8);
@@ -90,7 +94,7 @@ float ray_aabb_dst(Ray ray, float3 boxMin, float3 boxMax)
   return dst;
 };
 
-bool hit_scene(Ray ray, out HitRecord rec, out uint box_test_count) {
+bool intersect_scene(Ray ray, out HitRecord rec, out uint box_test_count) {
   uint bvh_count, bvh_stride;
   bvh.GetDimensions(bvh_count, bvh_stride);
 
@@ -142,12 +146,6 @@ bool hit_scene(Ray ray, out HitRecord rec, out uint box_test_count) {
   return hit;
 }
 
-float2 dir_to_equi(float3 d) {
-  float x = (atan2(d.x, d.z) * 1.0f/PI) * 0.5f + 0.5f;
-  float y = (asin(d.y) * 2.0f/PI) * 0.5f + 0.5f;
-  return float2(x, 1.0f-y);
-}
-
 Ray make_ray(float3 o, float3 d) {
   Ray ray;
   ray.o = o;
@@ -156,50 +154,108 @@ Ray make_ray(float3 o, float3 d) {
   return ray;
 }
 
-float3 frag_func(float depth, float3 normal, float3 world, float3 camera_pos) {
-  float3 view_dir = normalize(camera_pos - world);
+uint hash32(uint key)
+{
+  key = ~key + (key << 15); // key = (key << 15) - key - 1;
+  key = key ^ (key >> 12);
+  key = key + (key << 2);
+  key = key ^ (key >> 4);
+  key = key * 2057; // key = (key + (key << 3)) + (key << 11);
+  key = key ^ (key >> 16);
+  return key;
+}
 
-  if (depth < 1e-6) {
-    float2 uv = dir_to_equi(-view_dir);
-    return hdri.SampleLevel(linear_wrap_sampler, uv, 0).rgb;
-  }
+uint splitmix32(inout uint state) {
+  uint z = (state += 0x9e3779b9);
+  z ^= z >> 16; z *= 0x21f0aaad;
+  z ^= z >> 15; z *= 0x735a2d97;
+  z ^= z >> 15;
+  return z;
+}
 
-  float3 light_dir = normalize(float3(1.0f, 1.0f, 1.0f));
+float uniform_random(inout uint state) {
+  return (float)((double)splitmix32(state)/(double)0xffffffff);
+}
 
-  Ray ray = make_ray(world + normal * 1e-6, light_dir);
+float3 random_cosine_direction(inout uint state) {
+    float r1 = uniform_random(state);
+    float r2 = uniform_random(state);
 
-  HitRecord rec;
-  uint box_test_count;
+    float phi = 2.0f * PI * r1;
+    float x = cos(phi) * sqrt(r2);
+    float y = sin(phi) * sqrt(r2);
+    float z = sqrt(1.0f-r2);
 
-  if (hit_scene(ray, rec, box_test_count)) {
-    return 0.0f.rrr;
-  }
-  else{
-    return max(dot(normal, light_dir), 0.0f) * 1.0f.rrr;
-  }
+    return float3(x, y, z);
+}
+
+float3 sample_cosine_hemisphere(inout uint state, float3 n) {
+  float3 a;
+
+  if (abs(n.x) > 0.9f) {
+    a = float3(0.0, 1.0, 0.0);
+  } else {       
+    a = float3(1.0, 0.0, 0.0);
+  };
+
+  float3 s = normalize(cross(n, a));
+  float3 t = cross(n, s);
+
+  float3 v = random_cosine_direction(state);
+  return v.x*s + v.y*t + v.z*n;
 }
 
 [numthreads(16, 16, 1)]
 void main( uint3 thread_id : SV_DispatchThreadID )
 {
-  uint2 texel = thread_id.xy;
-
   uint w, h;
   render_target.GetDimensions(w, h);
+
+  uint2 texel = thread_id.xy;
+  uint state = hash32(texel.y * w + texel.x) ^ hash32(frame);
 
   float2 screen_uv = float2(texel.x, texel.y) / float2((float)w, (float)h);
 
   float3 camera_pos = mul(inv_view, float4(0.0f, 0.0f, 0.0f, 1.0f)).xyz;
-  float depth = depth_buffer.Sample(point_clamp_sampler, screen_uv, 2);
-  float3 normal = gbuffer_normal.SampleLevel(point_clamp_sampler, screen_uv, 2).xyz * 2.0f - 1.0f;
+  float depth = depth_buffer.SampleLevel(point_clamp_sampler, screen_uv, 1);
+  float3 normal = gbuffer_normal.SampleLevel(point_clamp_sampler, screen_uv, 1).xyz * 2.0f - 1.0f;
 
   float4 ndc = float4(screen_uv.x * 2.0f - 1.0, screen_uv.y * -2.0f + 1.0f, depth, 1.0f);
   float4 hom = mul(inv_view_proj, ndc);
   float3 world = hom.xyz / hom.w;
 
-  float3 color = normal * 0.5f + 0.5f;//frag_func(depth, normal, world, camera_pos);
+  float3 color;
+
+  if (depth > 0.0f) {
+    Ray ray = make_ray(world + normal * 1e-6f, sample_cosine_hemisphere(state, normal));
+
+    float3 aggregate = 1.0f.xxx;
+
+    for (int i = 0; i <= BOUNCE_LIMIT; ++i) {
+      if (i == BOUNCE_LIMIT) {
+        aggregate = 0.0f;
+      }
+
+      HitRecord rec;
+      uint box_test_count;
+
+      if (intersect_scene(ray, rec, box_test_count)) {
+        aggregate *= 0.9f;
+        ray = make_ray(rec.p + rec.n * 1e-6f, sample_cosine_hemisphere(state, rec.n));
+      }
+      else{
+        aggregate *= hdri.SampleLevel(linear_wrap_sampler, dir_to_equi(ray.d), 0.0f);
+        break;
+      }
+    }
+
+    color = aggregate;
+  }
+  else{
+    color = 0.0f.xxx;
+  }
 
   if (all(texel < uint2(w, h))) {
-    render_target[texel] = float4(sqrt(color), 0.0f);
+    render_target[texel] = float4(sqrt(ACESFilm(color)), 0.0f);
   }
 }

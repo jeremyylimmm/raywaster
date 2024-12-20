@@ -120,6 +120,7 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="src\shaders\gbuffer.hlsli" />
+    <None Include="src\shaders\common.hlsli" />
     <None Include="src\shaders\screen_quad.hlsli" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

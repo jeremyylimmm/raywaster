@@ -93,8 +93,8 @@ struct FrameDependents {
     device->CreateRenderTargetView(swapchain_texture, &swapchain_rtv_rtv_desc, &swapchain_rtv);
 
     D3D11_TEXTURE2D_DESC lighting_buffer_desc = {};
-    lighting_buffer_desc.Width = swapchain_desc.BufferDesc.Width >> 2;
-    lighting_buffer_desc.Height = swapchain_desc.BufferDesc.Height >> 2;
+    lighting_buffer_desc.Width = swapchain_desc.BufferDesc.Width >> 1;
+    lighting_buffer_desc.Height = swapchain_desc.BufferDesc.Height >> 1;
     lighting_buffer_desc.MipLevels = 1;
     lighting_buffer_desc.ArraySize = 1;
     lighting_buffer_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -299,6 +299,7 @@ struct CameraCbuffer {
   XMMATRIX inv_view;
   XMMATRIX inv_view_proj;
   XMMATRIX view_proj;
+  uint32_t frame;
 };
 
 template<typename T>
@@ -556,7 +557,11 @@ int main() {
   float camera_sensitivity = 2e-3f;
   float camera_speed = 2e-3f;
 
+  uint32_t frame = 0;
+
   for (;;) {
+    frame++;
+
     window_events = {};
 
     MSG msg;
@@ -617,6 +622,7 @@ int main() {
     camera_cbuffer_data->inv_view = XMMatrixInverse(nullptr, view);
     camera_cbuffer_data->inv_view_proj = XMMatrixInverse(nullptr, view_proj);
     camera_cbuffer_data->view_proj = view_proj;
+    camera_cbuffer_data->frame = frame;
 
     ctx->Unmap(camera_cbuffer, 0);
 
@@ -712,13 +718,19 @@ int main() {
     ctx->PSSetShader(combine_ps, nullptr, 0);
 
     ID3D11ShaderResourceView* combine_srvs_bind[] = {
-      frame_dependents.lighting_buffer_srv
+      frame_dependents.lighting_buffer_srv,
+      hdri_srv,
+      frame_dependents.depth_texture_srv,
     };
 
     ctx->PSSetShaderResources(0, std::size(combine_srvs_bind), combine_srvs_bind);
 
+    ctx->PSSetConstantBuffers(0, 1, &camera_cbuffer);
+
     ID3D11SamplerState* combine_samplers_bind[] = {
-      linear_clamp_sampler
+      point_clamp_sampler,
+      linear_clamp_sampler,
+      linear_wrap_sampler
     };
 
     ctx->PSSetSamplers(0, std::size(combine_samplers_bind), combine_samplers_bind);
