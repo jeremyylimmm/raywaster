@@ -9,6 +9,7 @@ struct BVHNode {
 };
 
 RWTexture2D<float4> render_target : register(u0);
+RWStructuredBuffer<SerializedReservoir> reservoir_buffer : register(u1);
 
 cbuffer Camera : register(b0) {
   float4x4 inv_view;
@@ -152,109 +153,6 @@ Ray make_ray(float3 o, float3 d) {
   return ray;
 }
 
-uint hash32(uint key)
-{
-  key = ~key + (key << 15); // key = (key << 15) - key - 1;
-  key = key ^ (key >> 12);
-  key = key + (key << 2);
-  key = key ^ (key >> 4);
-  key = key * 2057; // key = (key + (key << 3)) + (key << 11);
-  key = key ^ (key >> 16);
-  return key;
-}
-
-uint splitmix32(inout uint state) {
-  uint z = (state += 0x9e3779b9);
-  z ^= z >> 16; z *= 0x21f0aaad;
-  z ^= z >> 15; z *= 0x735a2d97;
-  z ^= z >> 15;
-  return z;
-}
-
-float uniform_random(inout uint state) {
-  return (float)((double)splitmix32(state)/(double)0xffffffff);
-}
-
-float3 random_cosine_direction(inout uint state) {
-    float r1 = uniform_random(state);
-    float r2 = uniform_random(state);
-
-    float phi = 2.0f * PI * r1;
-    float x = cos(phi) * sqrt(r2);
-    float y = sin(phi) * sqrt(r2);
-    float z = sqrt(1.0f-r2);
-
-    return float3(x, y, z);
-}
-
-float3 sample_cosine_hemisphere(inout uint state, float3 n) {
-  float3 a;
-
-  if (abs(n.x) > 0.9f) {
-    a = float3(0.0, 1.0, 0.0);
-  } else {       
-    a = float3(1.0, 0.0, 0.0);
-  };
-
-  float3 s = normalize(cross(n, a));
-  float3 t = cross(n, s);
-
-  float3 v = random_cosine_direction(state);
-  return v.x*s + v.y*t + v.z*n;
-}
-
-float3 sample_uniform_sphere(inout uint state) {
-  float u = uniform_random(state);
-  float v = uniform_random(state);
-
-  float z = 1.0f - 2.0f * u;
-  float r = sqrt(1.0f - z*z);
-  float phi = 2 * PI * v;
-
-  return normalize(float3(r * cos(phi), r * sin(phi), z));
-}
-
-float3 sample_uniform_hemisphere(inout uint state, float3 n) {
-  float3 v = sample_uniform_sphere(state);
-  if (dot(v, n) < 0.0f) {
-    v *= -1.0f;
-  }
-  return v;
-}
-
-struct RISSample {
-  float3 direction;
-  float factor;
-};
-
-RISSample RIS(inout uint state, float3 normal) {
-  const int m = 4;
-
-  float wsum = 0.0f;
-  float3 y = 0.0f;
-  float py = 0.0f;
-
-  for (int i = 0; i < m; ++i) {
-    float3 x = sample_uniform_hemisphere(state, normal);
-    float s = 1.0f/(2.0f * PI);
-    float r = hdri.SampleLevel(linear_wrap_sampler, dir_to_equi(x), 0.0f);
-
-    float w = r/s;
-    wsum += w;
-
-    if (uniform_random(state) < w / wsum) {
-      y = x;
-      py = r;
-    }
-  }
-
-  RISSample result;
-  result.direction = y;
-  result.factor = 1.0f/py * (1.0f/float(m) * wsum);
-
-  return result;
-}
-
 [numthreads(16, 16, 1)]
 void main( uint3 thread_id : SV_DispatchThreadID )
 {
@@ -277,9 +175,10 @@ void main( uint3 thread_id : SV_DispatchThreadID )
   float3 color;
 
   if (depth > 0.0f) {
-    RISSample ris_result = RIS(state, normal);
+    SerializedReservoir res = reservoir_buffer[texel.y*w+texel.x];
+    float3 dir = res.dir();
 
-    Ray ray = make_ray(world + normal * 1e-6f, ris_result.direction);
+    Ray ray = make_ray(world + normal * 1e-6f, dir);
 
     HitRecord rec;
     uint box_test_count;
@@ -288,8 +187,8 @@ void main( uint3 thread_id : SV_DispatchThreadID )
       color = 0.0f; // shadowed
     }
     else{
-      float angle_weighting = dot(ris_result.direction, normal) / PI;
-      color = angle_weighting * hdri.SampleLevel(linear_wrap_sampler, dir_to_equi(ray.d), 0.0f) * ris_result.factor;
+      float angle_weighting = dot(dir, normal) / PI;
+      color = angle_weighting * hdri.SampleLevel(linear_wrap_sampler, dir_to_equi(ray.d), 0.0f) * res.factor;
     }
   }
   else{

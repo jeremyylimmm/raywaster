@@ -32,6 +32,12 @@ static struct {
   float scroll_delta;
 } window_events;
 
+struct SerializedReservoir {
+  uint32_t y;
+  float w;
+  float factor;
+};
+
 struct FrameDependents {
   ID3D11Texture2D* swapchain_texture;
   ID3D11RenderTargetView* swapchain_rtv;
@@ -39,6 +45,9 @@ struct FrameDependents {
   ID3D11Texture2D* lighting_buffer;
   ID3D11UnorderedAccessView* lighting_buffer_uav;
   ID3D11ShaderResourceView* lighting_buffer_srv;
+
+  ID3D11Buffer* reservoir_buffer;
+  ID3D11UnorderedAccessView* reservoir_buffer_uav;
 
   ID3D11Texture2D* depth_buffer;
   ID3D11DepthStencilView* dsv;
@@ -59,6 +68,8 @@ struct FrameDependents {
 
   void release() {
     if (swapchain_texture) {
+      reservoir_buffer_uav->Release();
+      reservoir_buffer->Release();
       gbuffer_normal_srv->Release();
       gbuffer_albedo_srv->Release();
       gbuffer_normal_rtv->Release();
@@ -107,11 +118,11 @@ struct FrameDependents {
 
     device->CreateTexture2D(&lighting_buffer_desc, nullptr, &lighting_buffer);
 
-    D3D11_UNORDERED_ACCESS_VIEW_DESC uav_desc = {};
-    uav_desc.Format = lighting_buffer_desc.Format;
-    uav_desc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
+    D3D11_UNORDERED_ACCESS_VIEW_DESC lighting_buffer_uav_desc = {};
+    lighting_buffer_uav_desc.Format = lighting_buffer_desc.Format;
+    lighting_buffer_uav_desc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
 
-    device->CreateUnorderedAccessView(lighting_buffer, &uav_desc, &lighting_buffer_uav);
+    device->CreateUnorderedAccessView(lighting_buffer, &lighting_buffer_uav_desc, &lighting_buffer_uav);
 
     D3D11_SHADER_RESOURCE_VIEW_DESC lighting_buffer_srv_desc = {};
     lighting_buffer_srv_desc.Format = lighting_buffer_desc.Format;
@@ -119,6 +130,21 @@ struct FrameDependents {
     lighting_buffer_srv_desc.Texture2D.MipLevels = (UINT)-1;
 
     device->CreateShaderResourceView(lighting_buffer, &lighting_buffer_srv_desc, &lighting_buffer_srv);
+
+    D3D11_BUFFER_DESC reservoir_buffer_desc = {};
+    reservoir_buffer_desc.ByteWidth = lighting_buffer_desc.Width * lighting_buffer_desc.Height * sizeof(SerializedReservoir);
+    reservoir_buffer_desc.Usage = D3D11_USAGE_DEFAULT;
+    reservoir_buffer_desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+    reservoir_buffer_desc.StructureByteStride = sizeof(SerializedReservoir);
+    reservoir_buffer_desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+
+    device->CreateBuffer(&reservoir_buffer_desc, nullptr, &reservoir_buffer);
+
+    D3D11_UNORDERED_ACCESS_VIEW_DESC reservoir_buffer_uav_desc = {};
+    reservoir_buffer_uav_desc.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+    reservoir_buffer_uav_desc.Buffer.NumElements = lighting_buffer_desc.Width * lighting_buffer_desc.Height;
+
+    device->CreateUnorderedAccessView(reservoir_buffer, &reservoir_buffer_uav_desc, &reservoir_buffer_uav);
 
     D3D11_TEXTURE2D_DESC depth_buffer_desc = {};
     depth_buffer_desc.Width = swapchain_desc.BufferDesc.Width;
@@ -380,6 +406,49 @@ static Mesh combine_model(const Model& model) {
   };
 }
 
+static std::tuple<ID3D11ComputeShader*, uint32_t, uint32_t> create_compute_shader(ID3D11Device* device, const std::vector<char>& code) {
+  ID3D11ComputeShader* cs = nullptr;
+  device->CreateComputeShader(code.data(), code.size(), nullptr, &cs);
+  ID3D11ShaderReflection* cs_refl = nullptr;
+  D3DReflect(code.data(), code.size(), IID_PPV_ARGS(&cs_refl));
+  UINT w, h;
+  cs_refl->GetThreadGroupSize(&w, &h, nullptr);
+  cs_refl->Release();
+
+  return {cs, w, h};
+}
+
+template<typename T>
+struct ConstantBuffer {
+  ID3D11Buffer* buffer;
+
+  void init(ID3D11Device* device) {
+    D3D11_BUFFER_DESC desc = {};
+    desc.ByteWidth = (sizeof(T) + 15) & ~15;
+    desc.Usage = D3D11_USAGE_DYNAMIC;
+    desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+
+    device->CreateBuffer(&desc, nullptr, &buffer);
+  }
+
+  T* map(ID3D11DeviceContext* ctx) {
+    D3D11_MAPPED_SUBRESOURCE mapped_camera_cbuffer;
+    ctx->Map(buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped_camera_cbuffer);
+    return (T*)mapped_camera_cbuffer.pData;
+  }
+
+  void unmap(ID3D11DeviceContext* ctx) {
+    ctx->Unmap(buffer, 0);
+  }
+};
+
+struct ReservoirConstants {
+  uint32_t width;
+  uint32_t height;
+  uint32_t frame;
+};
+
 int main() {
   WNDCLASSA wc = {
     .lpfnWndProc = window_proc,
@@ -431,18 +500,14 @@ int main() {
   frame_dependents.init(device, swapchain);
 
   std::vector<char> lighting_cs_code = load_bin("bin/lighting_cs.cso");
+  std::vector<char> reservoir1_cs_code = load_bin("bin/reservoir1_cs.cso");
   std::vector<char> gbuffer_vs_code = load_bin("bin/gbuffer_vs.cso");
   std::vector<char> gbuffer_ps_code = load_bin("bin/gbuffer_ps.cso");
   std::vector<char> screen_quad_vs_code = load_bin("bin/screen_quad_vs.cso");
   std::vector<char> combine_ps_code = load_bin("bin/combine_ps.cso");
 
-  ID3D11ComputeShader* lighting_cs = nullptr;
-  device->CreateComputeShader(lighting_cs_code.data(), lighting_cs_code.size(), nullptr, &lighting_cs);
-  ID3D11ShaderReflection* cs_refl = nullptr;
-  D3DReflect(lighting_cs_code.data(), lighting_cs_code.size(), IID_PPV_ARGS(&cs_refl));
-  UINT lighting_cs_thread_group_x, lighting_cs_thread_group_y;
-  cs_refl->GetThreadGroupSize(&lighting_cs_thread_group_x, &lighting_cs_thread_group_y, nullptr);
-  cs_refl->Release();
+  auto [lighting_cs, lighting_cs_thread_group_x, lighting_cs_thread_group_y] = create_compute_shader(device, lighting_cs_code);
+  auto [reservoir1_cs, reservoir1_cs_thread_group_x, reservoir1_cs_thread_group_y] = create_compute_shader(device, reservoir1_cs_code);
 
   ID3D11VertexShader* gbuffer_vs = nullptr;
   ID3D11PixelShader* gbuffer_ps = nullptr;
@@ -461,15 +526,6 @@ int main() {
 
   ID3D11DepthStencilState* depth_state = nullptr;
   device->CreateDepthStencilState(&depth_state_desc, &depth_state);
-
-  D3D11_BUFFER_DESC camera_cbuffer_desc = {};
-  camera_cbuffer_desc.ByteWidth = sizeof(CameraCbuffer);
-  camera_cbuffer_desc.Usage = D3D11_USAGE_DYNAMIC;
-  camera_cbuffer_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-  camera_cbuffer_desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-
-  ID3D11Buffer* camera_cbuffer = nullptr;
-  device->CreateBuffer(&camera_cbuffer_desc, nullptr, &camera_cbuffer);
 
   Mesh mesh = combine_model(*load_gltf("models/test/scene.gltf"));
 
@@ -547,6 +603,12 @@ int main() {
   device->CreateSamplerState(&point_clamp_sampler_desc, &point_clamp_sampler);
   device->CreateSamplerState(&linear_clamp_sampler_desc, &linear_clamp_sampler);
 
+  ConstantBuffer<CameraCbuffer> camera_cbuffer;
+  ConstantBuffer<ReservoirConstants> reservoir_cbuffer;
+
+  camera_cbuffer.init(device);
+  reservoir_cbuffer.init(device);
+
   auto timer_start = std::chrono::steady_clock::now();
   int timer_count = 0;
 
@@ -615,16 +677,12 @@ int main() {
     XMMATRIX proj = XMMatrixPerspectiveFovRH(XM_PI*0.25f, (float)frame_dependents.w/(float)frame_dependents.h, 1000.0f, 0.01f);
     XMMATRIX view_proj = view * proj;
 
-    D3D11_MAPPED_SUBRESOURCE mapped_camera_cbuffer;
-    ctx->Map(camera_cbuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped_camera_cbuffer);
-
-    CameraCbuffer* camera_cbuffer_data = (CameraCbuffer*)mapped_camera_cbuffer.pData;
+    CameraCbuffer* camera_cbuffer_data = camera_cbuffer.map(ctx);
     camera_cbuffer_data->inv_view = XMMatrixInverse(nullptr, view);
     camera_cbuffer_data->inv_view_proj = XMMatrixInverse(nullptr, view_proj);
     camera_cbuffer_data->view_proj = view_proj;
     camera_cbuffer_data->frame = frame;
-
-    ctx->Unmap(camera_cbuffer, 0);
+    camera_cbuffer.unmap(ctx);
 
     float clear_color[4] = {};
     ctx->ClearRenderTargetView(frame_dependents.gbuffer_albedo_rtv, clear_color);
@@ -634,7 +692,7 @@ int main() {
     ctx->PSSetShader(gbuffer_ps, nullptr, 0);
     ctx->VSSetShader(gbuffer_vs, nullptr, 0);
 
-    ctx->VSSetConstantBuffers(0, 1, &camera_cbuffer);
+    ctx->VSSetConstantBuffers(0, 1, &camera_cbuffer.buffer);
 
     ID3D11ShaderResourceView* gbuffer_srvs_bind[] = {
       positions_srv,
@@ -678,9 +736,38 @@ int main() {
     ctx->GenerateMips(frame_dependents.gbuffer_albedo_srv);
     ctx->GenerateMips(frame_dependents.gbuffer_normal_srv);
 
+    // generate reservoirs
+
+    ReservoirConstants* reservoir_constants = reservoir_cbuffer.map(ctx);
+    reservoir_constants->width = frame_dependents.lighting_w;
+    reservoir_constants->height = frame_dependents.lighting_h;
+    reservoir_constants->frame = frame;
+    reservoir_cbuffer.unmap(ctx);
+
+    ctx->CSSetShader(reservoir1_cs, nullptr, 0);
+    ctx->CSSetConstantBuffers(0, 1, &reservoir_cbuffer.buffer);
+    ctx->CSSetUnorderedAccessViews(0, 1, &frame_dependents.reservoir_buffer_uav, nullptr);
+
+    ID3D11ShaderResourceView* reservoir1_srv_binds[] = {
+      frame_dependents.gbuffer_normal_srv,
+      hdri_srv,
+    };
+
+    ctx->CSSetShaderResources(0, std::size(reservoir1_srv_binds), reservoir1_srv_binds);
+
+    ID3D11SamplerState* reservoir1_sampler_binds[] = {
+      point_clamp_sampler,
+      linear_wrap_sampler
+    };
+
+    ctx->CSSetSamplers(0, std::size(reservoir1_sampler_binds), reservoir1_sampler_binds);
+    ctx->Dispatch((frame_dependents.lighting_w+reservoir1_cs_thread_group_x-1)/reservoir1_cs_thread_group_x, (frame_dependents.lighting_h+reservoir1_cs_thread_group_y-1)/reservoir1_cs_thread_group_y, 1);
+
+    // lighting pass
+
     ctx->CSSetShader(lighting_cs, nullptr, 0);
 
-    ctx->CSSetConstantBuffers(0, 1, &camera_cbuffer);
+    ctx->CSSetConstantBuffers(0, 1, &camera_cbuffer.buffer);
 
     ID3D11ShaderResourceView* cs_srvs_bind[] = {
       positions_srv,
@@ -703,11 +790,16 @@ int main() {
 
     ctx->CSSetSamplers(0, std::size(lighting_samplers_bind), lighting_samplers_bind);
 
-    ctx->CSSetUnorderedAccessViews(0, 1, &frame_dependents.lighting_buffer_uav, nullptr);
+    ID3D11UnorderedAccessView* lighting_uavs_bind[] = {
+      frame_dependents.lighting_buffer_uav,
+      frame_dependents.reservoir_buffer_uav
+    };
+
+    ctx->CSSetUnorderedAccessViews(0, std::size(lighting_uavs_bind), lighting_uavs_bind, nullptr);
     ctx->Dispatch((frame_dependents.lighting_w+lighting_cs_thread_group_x-1)/lighting_cs_thread_group_x, (frame_dependents.lighting_h+lighting_cs_thread_group_y-1)/lighting_cs_thread_group_y, 1);
 
-    ID3D11UnorderedAccessView* null_uav = nullptr;
-    ctx->CSSetUnorderedAccessViews(0, 1, &null_uav, nullptr);
+    memset(lighting_uavs_bind, 0, sizeof(lighting_uavs_bind));
+    ctx->CSSetUnorderedAccessViews(0, std::size(lighting_uavs_bind), lighting_uavs_bind, nullptr);
 
     memset(cs_srvs_bind, 0, sizeof(cs_srvs_bind));
     ctx->CSSetShaderResources(0, std::size(cs_srvs_bind), cs_srvs_bind);
@@ -725,7 +817,7 @@ int main() {
 
     ctx->PSSetShaderResources(0, std::size(combine_srvs_bind), combine_srvs_bind);
 
-    ctx->PSSetConstantBuffers(0, 1, &camera_cbuffer);
+    ctx->PSSetConstantBuffers(0, 1, &camera_cbuffer.buffer);
 
     ID3D11SamplerState* combine_samplers_bind[] = {
       point_clamp_sampler,

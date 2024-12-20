@@ -31,6 +31,7 @@
     <FxCompile Include="src\shaders\gbuffer_ps.hlsl" />
     <FxCompile Include="src\shaders\screen_quad_vs.hlsl" />
     <FxCompile Include="src\shaders\combine_ps.hlsl" />
+    <FxCompile Include="src\shaders\reservoir1_cs.hlsl" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\model.h">
