@@ -2,8 +2,6 @@
 
 #define MAX_BVH_DEPTH 32
 
-#define BOUNCE_LIMIT 4
-
 struct BVHNode {
   float3 min;
   float3 max;
@@ -205,6 +203,58 @@ float3 sample_cosine_hemisphere(inout uint state, float3 n) {
   return v.x*s + v.y*t + v.z*n;
 }
 
+float3 sample_uniform_sphere(inout uint state) {
+  float u = uniform_random(state);
+  float v = uniform_random(state);
+
+  float z = 1.0f - 2.0f * u;
+  float r = sqrt(1.0f - z*z);
+  float phi = 2 * PI * v;
+
+  return normalize(float3(r * cos(phi), r * sin(phi), z));
+}
+
+float3 sample_uniform_hemisphere(inout uint state, float3 n) {
+  float3 v = sample_uniform_sphere(state);
+  if (dot(v, n) < 0.0f) {
+    v *= -1.0f;
+  }
+  return v;
+}
+
+struct RISSample {
+  float3 direction;
+  float factor;
+};
+
+RISSample RIS(inout uint state, float3 normal) {
+  const int m = 4;
+
+  float wsum = 0.0f;
+  float3 y = 0.0f;
+  float py = 0.0f;
+
+  for (int i = 0; i < m; ++i) {
+    float3 x = sample_uniform_hemisphere(state, normal);
+    float s = 1.0f/(2.0f * PI);
+    float r = hdri.SampleLevel(linear_wrap_sampler, dir_to_equi(x), 0.0f);
+
+    float w = r/s;
+    wsum += w;
+
+    if (uniform_random(state) < w / wsum) {
+      y = x;
+      py = r;
+    }
+  }
+
+  RISSample result;
+  result.direction = y;
+  result.factor = 1.0f/py * (1.0f/float(m) * wsum);
+
+  return result;
+}
+
 [numthreads(16, 16, 1)]
 void main( uint3 thread_id : SV_DispatchThreadID )
 {
@@ -227,29 +277,20 @@ void main( uint3 thread_id : SV_DispatchThreadID )
   float3 color;
 
   if (depth > 0.0f) {
-    Ray ray = make_ray(world + normal * 1e-6f, sample_cosine_hemisphere(state, normal));
+    RISSample ris_result = RIS(state, normal);
 
-    float3 aggregate = 1.0f.xxx;
+    Ray ray = make_ray(world + normal * 1e-6f, ris_result.direction);
 
-    for (int i = 0; i <= BOUNCE_LIMIT; ++i) {
-      if (i == BOUNCE_LIMIT) {
-        aggregate = 0.0f;
-      }
+    HitRecord rec;
+    uint box_test_count;
 
-      HitRecord rec;
-      uint box_test_count;
-
-      if (intersect_scene(ray, rec, box_test_count)) {
-        aggregate *= 0.9f;
-        ray = make_ray(rec.p + rec.n * 1e-6f, sample_cosine_hemisphere(state, rec.n));
-      }
-      else{
-        aggregate *= hdri.SampleLevel(linear_wrap_sampler, dir_to_equi(ray.d), 0.0f);
-        break;
-      }
+    if (intersect_scene(ray, rec, box_test_count)) {
+      color = 0.0f; // shadowed
     }
-
-    color = aggregate;
+    else{
+      float angle_weighting = dot(ris_result.direction, normal) / PI;
+      color = angle_weighting * hdri.SampleLevel(linear_wrap_sampler, dir_to_equi(ray.d), 0.0f) * ris_result.factor;
+    }
   }
   else{
     color = 0.0f.xxx;
